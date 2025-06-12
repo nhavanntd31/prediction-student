@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import List, Dict, Tuple, Optional
 import warnings
+import argparse
 warnings.filterwarnings('ignore')
 
 class StudentPerformanceDataProcessor:
@@ -393,6 +394,16 @@ def create_student_sequences(course_df: pd.DataFrame, perf_df: pd.DataFrame,
     return sequences
 
 def main():
+    parser = argparse.ArgumentParser(description='Student Performance Prediction Model')
+    parser.add_argument('--course_csv', type=str, required=True, help='Path to course data CSV file')
+    parser.add_argument('--performance_csv', type=str, required=True, help='Path to performance data CSV file')
+    parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
+    parser.add_argument('--output_model', type=str, default='best_model.pth', help='Path to save the trained model')
+    parser.add_argument('--output_plot', type=str, default='training_results.png', help='Path to save the training plot')
+    
+    args = parser.parse_args()
+    
     print("=== MÔ HÌNH DỰ ĐOÁN KẾT QUẢ HỌC TẬP SINH VIÊN ===")
     print("Architecture: Course Encoder + Transformer + LSTM + Attention")
     
@@ -417,8 +428,11 @@ def main():
     print(f"\nSử dụng device: {device}")
     
     print("\nĐang tải dữ liệu...")
-    course_df = pd.read_csv('csv/ET1_K62_K63_K64.csv')
-    perf_df = pd.read_csv('csv/ET1_K62_K63_K64_performance.csv')
+    print(f"Course CSV: {args.course_csv}")
+    print(f"Performance CSV: {args.performance_csv}")
+    
+    course_df = pd.read_csv(args.course_csv)
+    perf_df = pd.read_csv(args.performance_csv)
     
     print(f"Course data: {len(course_df)} records")
     print(f"Performance data: {len(perf_df)} records")
@@ -438,9 +452,9 @@ def main():
     val_dataset = StudentSequenceDataset(val_sequences)
     test_dataset = StudentSequenceDataset(test_sequences)
     
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, pin_memory=True if device.type == 'cuda' else False)
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, pin_memory=True if device.type == 'cuda' else False)
-    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False, pin_memory=True if device.type == 'cuda' else False)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, pin_memory=True if device.type == 'cuda' else False)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=True if device.type == 'cuda' else False)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=True if device.type == 'cuda' else False)
     
     print("\nĐang khởi tạo mô hình...")
     model = StudentPerformancePredictor()
@@ -458,10 +472,10 @@ def main():
     trainer = ModelTrainer(model, device)
     
     print("\nBắt đầu training...")
-    train_losses, val_losses = trainer.train(train_loader, val_loader, epochs=50)
+    train_losses, val_losses = trainer.train(train_loader, val_loader, epochs=args.epochs)
     
     print("\nĐang đánh giá mô hình trên test set...")
-    trainer.model.load_state_dict(torch.load('best_model.pth'))
+    trainer.model.load_state_dict(torch.load(args.output_model))
     test_metrics = trainer.evaluate(test_loader)
     
     print("\n" + "="*50)
@@ -527,7 +541,7 @@ def main():
     plt.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig('training_results.png', dpi=300, bbox_inches='tight')
+    plt.savefig(args.output_plot, dpi=300, bbox_inches='tight')
     plt.show()
     
     if device.type == 'cuda':
@@ -536,7 +550,7 @@ def main():
         print(f"CUDA memory allocated: {torch.cuda.memory_allocated(0) / 1024**2:.2f} MB")
         print(f"CUDA memory cached: {torch.cuda.memory_reserved(0) / 1024**2:.2f} MB")
     
-    print(f"\nĐã lưu kết quả vào 'training_results.png' và model weights vào 'best_model.pth'")
+    print(f"\nĐã lưu kết quả vào '{args.output_plot}' và model weights vào '{args.output_model}'")
 
 if __name__ == "__main__":
     main() 
