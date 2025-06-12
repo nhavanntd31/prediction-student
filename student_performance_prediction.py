@@ -23,14 +23,25 @@ class StudentPerformanceDataProcessor:
         self.warning_mapping = {
             'Mức 0': 0, 'Mức 1': 1, 'Mức 2': 2, 'Mức 3': 3
         }
+        self.scaler = StandardScaler()
+        
+    def clean_numeric_data(self, df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
+        for col in columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            mean_val = df[col].mean()
+            df[col] = df[col].fillna(mean_val)
+            df[col] = df[col].replace([np.inf, -np.inf], mean_val)
+        return df
         
     def preprocess_course_data(self, course_df: pd.DataFrame) -> pd.DataFrame:
         df = course_df.copy()
         
         df['Final Grade Numeric'] = df['Final Grade'].map(self.grade_mapping)
-        df['Continuous Assessment Score'] = pd.to_numeric(df['Continuous Assessment Score'], errors='coerce').fillna(0)
-        df['Exam Score'] = pd.to_numeric(df['Exam Score'], errors='coerce').fillna(0)
-        df['Credits'] = pd.to_numeric(df['Credits'], errors='coerce').fillna(0)
+        
+        numeric_features = ['Continuous Assessment Score', 'Exam Score', 'Credits', 
+                          'Final Grade Numeric']
+        
+        df = self.clean_numeric_data(df, numeric_features)
         
         df['Course_Category'] = df['Course ID'].str[:2]
         course_cat_encoder = LabelEncoder()
@@ -39,17 +50,17 @@ class StudentPerformanceDataProcessor:
         df['Pass_Status'] = (df['Final Grade Numeric'] >= 1.0).astype(int)
         df['Grade_Points'] = df['Final Grade Numeric'] * df['Credits']
         
-        numeric_features = ['Continuous Assessment Score', 'Exam Score', 'Credits', 
-                          'Final Grade Numeric', 'Course_Category_Encoded', 'Pass_Status', 'Grade_Points']
+        all_features = numeric_features + ['Course_Category_Encoded', 'Pass_Status', 'Grade_Points']
         
-        return df[['Semester', 'student_id', 'Relative Term'] + numeric_features]
+        df[all_features] = self.scaler.fit_transform(df[all_features])
+        
+        return df[['Semester', 'student_id', 'Relative Term'] + all_features]
     
     def preprocess_performance_data(self, perf_df: pd.DataFrame) -> pd.DataFrame:
         df = perf_df.copy()
         
         numeric_cols = ['GPA', 'CPA', 'TC qua', 'Acc', 'Debt', 'Reg']
-        for col in numeric_cols:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        df = self.clean_numeric_data(df, numeric_cols)
         
         df['Warning_Numeric'] = df['Warning'].map(self.warning_mapping).fillna(0)
         
@@ -59,9 +70,16 @@ class StudentPerformanceDataProcessor:
         df['Debt_Rate'] = df['Debt'] / (df['Reg'] + 1e-8)
         df['Accumulation_Rate'] = df['Acc'] / (df['Relative Term'] * 20 + 1e-8)
         
-        return df[['Semester', 'student_id', 'Relative Term', 'GPA', 'CPA', 'TC qua', 'Acc', 
-                  'Debt', 'Reg', 'Warning_Numeric', 'Level_Year', 'Pass_Rate', 'Debt_Rate', 
-                  'Accumulation_Rate']]
+        rate_cols = ['Pass_Rate', 'Debt_Rate', 'Accumulation_Rate']
+        df = self.clean_numeric_data(df, rate_cols)
+        
+        performance_features = ['GPA', 'CPA', 'TC qua', 'Acc', 'Debt', 'Reg',
+                              'Warning_Numeric', 'Level_Year', 'Pass_Rate', 
+                              'Debt_Rate', 'Accumulation_Rate']
+        
+        df[performance_features] = self.scaler.fit_transform(df[performance_features])
+        
+        return df[['Semester', 'student_id', 'Relative Term'] + performance_features]
 
 class StudentSequenceDataset(Dataset):
     def __init__(self, student_sequences: List[Dict], max_courses_per_semester: int = 15, 
@@ -223,8 +241,8 @@ class ModelTrainer:
     def __init__(self, model: nn.Module, device: str = 'cuda' if torch.cuda.is_available() else 'cpu'):
         self.model = model.to(device)
         self.device = device
-        self.optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.01)
-        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, patience=5, factor=0.5)
+        self.optimizer = optim.AdamW(model.parameters(), lr=0.0001, weight_decay=0.01)
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, patience=5, factor=0.5, min_lr=1e-6)
         self.criterion = nn.MSELoss()
         
     def train_epoch(self, dataloader: DataLoader) -> float:
@@ -243,9 +261,21 @@ class ModelTrainer:
             
             self.optimizer.zero_grad()
             predictions = self.model(course_features, semester_features, course_masks, semester_masks)
+            
+            if torch.isnan(predictions).any():
+                print("Warning: NaN detected in predictions")
+                continue
+                
             loss = self.criterion(predictions, targets)
+            
+            if torch.isnan(loss):
+                print("Warning: NaN detected in loss")
+                continue
+                
             loss.backward()
+            
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            
             self.optimizer.step()
             
             total_loss += loss.item()
@@ -270,12 +300,27 @@ class ModelTrainer:
                 targets = torch.stack([target_gpa, target_cpa], dim=1)
                 
                 predictions = self.model(course_features, semester_features, course_masks, semester_masks)
+                
+                if torch.isnan(predictions).any():
+                    continue
+                    
                 loss = self.criterion(predictions, targets)
                 
+                if torch.isnan(loss):
+                    continue
+                    
                 total_loss += loss.item()
                 all_predictions.append(predictions.cpu().numpy())
                 all_targets.append(targets.cpu().numpy())
         
+        if not all_predictions:
+            return {
+                'loss': float('inf'),
+                'gpa_mse': float('inf'), 'cpa_mse': float('inf'),
+                'gpa_mae': float('inf'), 'cpa_mae': float('inf'),
+                'gpa_r2': float('-inf'), 'cpa_r2': float('-inf')
+            }
+            
         all_predictions = np.vstack(all_predictions)
         all_targets = np.vstack(all_targets)
         
@@ -329,10 +374,10 @@ class ModelTrainer:
             else:
                 patience_counter += 1
             
-            if epoch % 10 == 0:
-                print(f'Epoch {epoch}: Train Loss={train_loss:.4f}, Val Loss={val_loss:.4f}')
-                print(f'  GPA - MSE: {val_metrics["gpa_mse"]:.4f}, MAE: {val_metrics["gpa_mae"]:.4f}, R2: {val_metrics["gpa_r2"]:.4f}')
-                print(f'  CPA - MSE: {val_metrics["cpa_mse"]:.4f}, MAE: {val_metrics["cpa_mae"]:.4f}, R2: {val_metrics["cpa_r2"]:.4f}')
+            
+            print(f'Epoch {epoch}: Train Loss={train_loss:.4f}, Val Loss={val_loss:.4f}')
+            print(f'  GPA - MSE: {val_metrics["gpa_mse"]:.4f}, MAE: {val_metrics["gpa_mae"]:.4f}, R2: {val_metrics["gpa_r2"]:.4f}')
+            print(f'  CPA - MSE: {val_metrics["cpa_mse"]:.4f}, MAE: {val_metrics["cpa_mae"]:.4f}, R2: {val_metrics["cpa_r2"]:.4f}')
             
             if patience_counter >= patience:
                 print(f'Early stopping at epoch {epoch}')
@@ -344,17 +389,19 @@ def create_student_sequences(course_df: pd.DataFrame, perf_df: pd.DataFrame,
                            processor: StudentPerformanceDataProcessor) -> List[Dict]:
     course_processed = processor.preprocess_course_data(course_df)
     perf_processed = processor.preprocess_performance_data(perf_df)
-    
     sequences = []
+    skipped_students = []
     
     for student_id in course_processed['student_id'].unique():
         student_courses = course_processed[course_processed['student_id'] == student_id]
         student_perf = perf_processed[perf_processed['student_id'] == student_id]
         
         if len(student_perf) < 2:
+            skipped_students.append(student_id)
             continue
             
         semester_data = []
+        has_null = False
         
         for _, perf_row in student_perf.iterrows():
             semester = perf_row['Semester']
@@ -371,6 +418,10 @@ def create_student_sequences(course_df: pd.DataFrame, perf_df: pd.DataFrame,
                                            'Warning_Numeric', 'Level_Year', 'Pass_Rate', 
                                            'Debt_Rate', 'Accumulation_Rate']].values.tolist()
             
+            if np.isnan(course_features).any() or np.isnan(performance_features).any():
+                has_null = True
+                break
+                
             semester_data.append({
                 'semester': semester,
                 'relative_term': perf_row['Relative Term'],
@@ -378,6 +429,10 @@ def create_student_sequences(course_df: pd.DataFrame, perf_df: pd.DataFrame,
                 'performance': performance_features
             })
         
+        if has_null:
+            skipped_students.append(student_id)
+            continue
+            
         semester_data.sort(key=lambda x: x['relative_term'])
         
         for i in range(len(semester_data) - 1):
@@ -390,6 +445,9 @@ def create_student_sequences(course_df: pd.DataFrame, perf_df: pd.DataFrame,
                 'target_gpa': target_semester['performance'][0],
                 'target_cpa': target_semester['performance'][1]
             })
+    
+    print(f"\nSố sinh viên bị loại do dữ liệu null: {len(skipped_students)}")
+    print(f"Danh sách sinh viên bị loại: {skipped_students}")
     
     return sequences
 
