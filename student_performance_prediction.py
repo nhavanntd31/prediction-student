@@ -385,27 +385,45 @@ class ModelTrainer:
         
         return train_losses, val_losses
 
+def is_active_semester(perf_row, course_count):
+    gpa = perf_row['GPA'] if 'GPA' in perf_row else 0
+    tc_qua = perf_row['TC qua'] if 'TC qua' in perf_row else 0
+    
+    if pd.isna(gpa) or gpa == 0:
+        return False
+    if course_count == 0:
+        return False
+    if pd.isna(tc_qua) or tc_qua == 0:
+        return False
+    
+    return True
+
 def create_student_sequences(course_df: pd.DataFrame, perf_df: pd.DataFrame, 
                            processor: StudentPerformanceDataProcessor) -> List[Dict]:
     course_processed = processor.preprocess_course_data(course_df)
     perf_processed = processor.preprocess_performance_data(perf_df)
     sequences = []
     skipped_students = []
+    dropped_out_students = []
     
     for student_id in course_processed['student_id'].unique():
         student_courses = course_processed[course_processed['student_id'] == student_id]
         student_perf = perf_processed[perf_processed['student_id'] == student_id]
         
         if len(student_perf) < 2:
-            skipped_students.append(student_id)
+            skipped_students.append(f"{student_id} (ít hơn 2 kỳ)")
             continue
-            
+        
         semester_data = []
         has_null = False
         
         for _, perf_row in student_perf.iterrows():
             semester = perf_row['Semester']
             semester_courses = student_courses[student_courses['Semester'] == semester]
+            
+            if not is_active_semester(perf_row, len(semester_courses)):
+                print(f"Sinh viên {student_id} đã bỏ học/nghỉ học từ kỳ {semester}")
+                break
             
             if len(semester_courses) == 0:
                 continue
@@ -426,28 +444,44 @@ def create_student_sequences(course_df: pd.DataFrame, perf_df: pd.DataFrame,
                 'semester': semester,
                 'relative_term': perf_row['Relative Term'],
                 'courses': course_features,
-                'performance': performance_features
+                'performance': performance_features,
+                'gpa': perf_row['GPA'] if 'GPA' in perf_row else 0,
+                'tc_qua': perf_row['TC qua'] if 'TC qua' in perf_row else 0
             })
         
         if has_null:
-            skipped_students.append(student_id)
+            skipped_students.append(f"{student_id} (dữ liệu null)")
+            continue
+            
+        if len(semester_data) < 2:
+            dropped_out_students.append(f"{student_id} (bỏ học sớm)")
             continue
             
         semester_data.sort(key=lambda x: x['relative_term'])
         
+        valid_sequences_count = 0
         for i in range(len(semester_data) - 1):
             input_semesters = semester_data[:i+1]
             target_semester = semester_data[i+1]
             
-            sequences.append({
-                'student_id': student_id,
-                'semesters': input_semesters,
-                'target_gpa': target_semester['performance'][0],
-                'target_cpa': target_semester['performance'][1]
-            })
+            target_gpa = target_semester['gpa']
+            target_tc = target_semester['tc_qua']
+            
+            if target_gpa > 0 and target_tc > 0:
+                sequences.append({
+                    'student_id': student_id,
+                    'semesters': input_semesters,
+                    'target_gpa': target_semester['performance'][0],
+                    'target_cpa': target_semester['performance'][1]
+                })
+                valid_sequences_count += 1
+        
+        if valid_sequences_count == 0:
+            dropped_out_students.append(f"{student_id} (không có sequence hợp lệ)")
     
-    print(f"\nSố sinh viên bị loại do dữ liệu null: {len(skipped_students)}")
-    print(f"Danh sách sinh viên bị loại: {skipped_students}")
+    print(f"\nSố sinh viên bị loại do dữ liệu null/thiếu: {len(skipped_students)}")
+    print(f"Số sinh viên bỏ học/nghỉ học: {len(dropped_out_students)}")
+    print(f"Danh sách sinh viên bỏ học: {dropped_out_students[:10]}...")
     
     return sequences
 
